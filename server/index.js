@@ -17,8 +17,9 @@ const G = require('../shared/game.js');
 const PORT = process.env.PORT || 3000;
 const ROOM_MAX = Number(process.env.ROOM_MAX || 20);
 const LOBBY_MAX = Number(process.env.LOBBY_MAX || 12);
-const TICK = 1 / 30;          // simulace 30× za sekundu
-const SNAP_EVERY = 2;         // snapshot klientům 15× za sekundu
+const TICK = 1 / 40;          // simulace 40× za sekundu
+const SNAP_EVERY = 2;         // snapshot klientům 20× za sekundu
+const FULL_EVERY = 4;         // minimapa + žebříček jen v každém 4. snímku (5× za sekundu)
 
 const ROOT = path.join(__dirname, '..');
 const FILES = {
@@ -93,7 +94,12 @@ const server = http.createServer((req, res) => {
 });
 
 /* ---------- WebSocket ---------- */
-const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 2048, perMessageDeflate: { threshold: 512 } });
+const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 2048,
+  perMessageDeflate: { threshold: 512, clientNoContextTakeover: true } });
+wss.on('error', err => console.warn('ws server error:', err.message));
+server.on('clientError', (err, sock) => { try { sock.destroy(); } catch (e) {} });
+// Poslední pojistka: chybu zalogovat, ale hru nechat běžet dál
+process.on('uncaughtException', err => console.error('uncaught:', err));
 
 wss.on('connection', ws => {
   const c = { ws, name: 'Player', alive: true, room: null, pid: 0, lobby: null, inGame: false, msgs: 0, win: Date.now(),
@@ -103,7 +109,7 @@ wss.on('connection', ws => {
 
   ws.on('message', raw => {
     const now = Date.now(); if (now - c.win > 1000) { c.win = now; c.msgs = 0; }
-    if (++c.msgs > 80) return; // jednoduchý limit proti spamu
+    if (++c.msgs > 120) return; // jednoduchý limit proti spamu
     let m; try { m = JSON.parse(raw); } catch (e) { return; }
     if (!m || typeof m !== 'object') return;
     if (m.name) c.name = cleanName(m.name);
@@ -134,7 +140,9 @@ wss.on('connection', ws => {
       c.room.world.spawnPlayer(c.pid, { name: c.name, ci: m.ci | 0, skin: String(m.skin || '') });
       c.inGame = true; if (c.lobby) broadcastLobby(c.lobby);
     } else if (m.t === 'in' && c.room) {
-      c.room.world.input(c.pid, { a: Number(m.a), b: !!m.b, u: m.u ? 1 : 0, vw: Number(m.vw) || 1600, vh: Number(m.vh) || 1000 });
+      c.room.world.input(c.pid, { a: Number(m.a), b: !!m.b, u: m.u ? 1 : 0, q: Number(m.q), vw: Number(m.vw) || 1600, vh: Number(m.vh) || 1000 });
+    } else if (m.t === 'p') {
+      c.send({ t: 'p', c: m.c }); // ping pro měření odezvy
     } else if (m.t === 'name') {
       if (c.lobby) broadcastLobby(c.lobby);
     } else if (m.t === 'menu') {
@@ -144,6 +152,8 @@ wss.on('connection', ws => {
   });
 
   ws.on('pong', () => { c.alive = true; });
+  // Poškozená nebo useknutá zpráva (typicky odpojení uprostřed přenosu) nesmí shodit server všem
+  ws.on('error', err => { console.warn('client error:', err.code || err.message); try { ws.terminate(); } catch (e) {} });
   ws.on('close', () => { leaveLobby(c); leaveRoom(c); conns.delete(c); });
 });
 
@@ -158,9 +168,10 @@ setInterval(() => {
       if (r.clients.size === 0) continue; // prázdná aréna spí
       r.world.step(TICK);
       if (++r.tick % SNAP_EVERY === 0) {
+        const light = (r.tick / SNAP_EVERY) % FULL_EVERY !== 0;
         for (const [pid, c] of r.clients) {
           if (c.ws.readyState !== 1 || c.ws.bufferedAmount > 256 * 1024) continue; // pomalý klient: vynech snímek
-          const s = r.world.snapshot(pid);
+          const s = r.world.snapshot(pid, light);
           if (s.dead && c.inGame) { c.inGame = false; if (c.lobby) broadcastLobby(c.lobby); }
           c.ws.send(JSON.stringify({ t: 's', ...s }));
         }

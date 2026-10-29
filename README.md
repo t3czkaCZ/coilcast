@@ -26,6 +26,15 @@ Otevři adresu z Renderu, klikni na **Create lobby** (Vytvořit lobby) a pošli 
 
 Free server se po 15 minutách bez hráčů uspí. Kdo pak hru otevře první, čeká zhruba minutu, než se probudí.
 
+### Server ve Frankfurtu (nižší ping)
+`render.yaml` vytváří server ve Frankfurtu. Render ale neumí přesunout už existující službu do jiného regionu.
+Pokud ti hra běží v Oregonu (USA):
+1. Na GitHubu nahraj nové soubory (přepiš staré).
+2. Na Renderu otevři starou službu → **Settings** → úplně dole **Delete Web Service**.
+3. Dej znovu **New → Blueprint** a vyber repozitář. Nová služba vznikne ve Frankfurtu.
+
+Ping vidíš ve hře nad minimapou. Zelená znamená pod 80 ms, žlutá pod 160 ms.
+
 ### Úpravy hry později
 Uprav soubor přímo na GitHubu (ikona tužky), nebo nahraj novou verzi přes **Add file → Upload files**.
 Render si změnu všimne a za pár minut nasadí novou verzi sám.
@@ -51,6 +60,13 @@ npm start          # http://localhost:3000
 |---|---|---|
 | `ROOM_MAX` | 20 | max. lidí ve veřejné aréně |
 | `LOBBY_MAX` | 12 | max. lidí v lobby |
+
+## Síťový kód
+- Server počítá hru 40× a hráčům posílá stav 20× za sekundu. Minimapa a žebříček chodí jen 5× za sekundu.
+- **Předpověď pohybu:** klient čísluje vstupy a vlastního hada posouvá hned. Server vrací číslo posledního zpracovaného vstupu a klient z jeho stavu dopočítá zbytek. Rozdíl se plynule dorovná, takže had zatočí okamžitě i při vyšším pingu.
+- Ostatní hadi se vykreslují s malým zpožděním (85 ms) a plynule mezi snímky.
+- Poškozená nebo useknutá zpráva od klienta server neshodí.
+- `?debug=1` v adrese zpřístupní v konzoli `window.__cc` (stav sítě a předpovědi).
 
 ## Boti
 Boti jsou schválně slabší než člověk. Každý má náhodnou „šikovnost“, reaguje pomaleji, občas si nebezpečí nevšimne, kouzla používá opatrně, jeho rakety hůř zatáčejí a roste pomaleji.

@@ -1,8 +1,10 @@
 # Render Blueprint – Render podle tohoto souboru nastaví službu sám.
+# region: frankfurt = server v Německu, nejnižší ping pro hráče z Česka a Evropy.
 services:
   - type: web
     name: coilcast
     runtime: node
+    region: frankfurt
     plan: free
     buildCommand: npm install
     startCommand: npm start

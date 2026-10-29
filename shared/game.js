@@ -14,8 +14,12 @@
     ARENA: 2600, SP: 6, CELL: 80, FOOD_N: 700, BOX_N: 26,
     SNAKES_TARGET: 15,      // boti doplňují arénu do tohoto počtu hadů
     MIN_BOTS: 4,
-    ENERGY_MAX: 100, ENERGY_DRAIN: 34, ENERGY_REGEN: 17, ENERGY_DELAY: 0.5, ENERGY_MIN_START: 12
+    ENERGY_MAX: 100, ENERGY_DRAIN: 34, ENERGY_REGEN: 17, ENERGY_DELAY: 0.5, ENERGY_MIN_START: 12,
+    SPEED: 150, SPEED_BOOST: 280, SPEED_TURBO: 340
   };
+  // Pohyb je sdílený se serverem i s předpovědí na klientu, aby obě strany počítaly stejně
+  const turnRate = (mass, human) => (4.3 - Math.min(mass / 280, 1.9)) * (human ? 1 : .8);
+  const speedOf = (turbo, boosting, slow) => (turbo ? C.SPEED_TURBO : boosting ? C.SPEED_BOOST : C.SPEED) * (slow ? .5 : 1);
   const IK = ['turbo', 'shield', 'rocket', 'mine', 'magnet', 'bolt'];
   const ITEM_COL = { turbo: '#ffb020', shield: '#4fd8ff', rocket: '#ff4f7b', mine: '#c07bff', magnet: '#5cff9d', bolt: '#fff35c' };
   const PAL = ['#ff5d8f', '#46d9ff', '#ffd23f', '#7cff6b', '#b98cff', '#ff8a3d', '#3dffd0', '#ff6bd6', '#9cc3ff', '#f4ff5c'];
@@ -205,13 +209,13 @@
 
     /* ---------- pohyb ---------- */
     function updSnake(s, dt) {
-      const tr = (4.3 - Math.min(s.mass / 280, 1.9)) * (s.pid ? 1 : .8) * dt;
+      const tr = turnRate(s.mass, !!s.pid) * dt;
       s.angle += clamp(angDiff(s.want, s.angle), -tr, tr);
       // Boost bere energii, ne délku. Energie se dobíjí, když nebooostuješ.
       if (s.boost && (s.boosting ? s.en > 0 : s.en > C.ENERGY_MIN_START)) s.boosting = true; else s.boosting = false;
       if (s.boosting && s.fx.turbo <= 0) { s.en = Math.max(0, s.en - C.ENERGY_DRAIN * dt); s.enIdle = 0; }
       else { s.enIdle += dt; if (s.enIdle > C.ENERGY_DELAY) s.en = Math.min(C.ENERGY_MAX, s.en + C.ENERGY_REGEN * dt); }
-      let sp = 150; if (s.fx.turbo > 0) sp = 340; else if (s.boosting) sp = 280; if (s.fx.slow > 0) sp *= .5;
+      const sp = speedOf(s.fx.turbo > 0, s.boosting, s.fx.slow > 0);
       const S = s.segs, h = S[0];
       h.x += Math.cos(s.angle) * sp * dt; h.y += Math.sin(s.angle) * sp * dt;
       for (let i = 1; i < S.length; i++) {
@@ -347,10 +351,11 @@
       if (typeof msg.a === 'number' && isFinite(msg.a)) s.want = msg.a;
       if (typeof msg.b === 'boolean' || typeof msg.b === 'number') s.boost = !!msg.b;
       if (msg.u) useItem(s);
+      if (Number.isFinite(msg.q)) p.q = msg.q; // poslední zpracovaný vstup → klient podle toho dopočítá předpověď
     }
 
     const r1 = v => Math.round(v * 10) / 10;
-    function snapshot(pid) {
+    function snapshot(pid, light) { // light = bez minimapy a žebříčku (posílají se jen každý 4. snímek)
       const p = W.players.get(pid);
       const me = p && p.snake && p.snake.alive ? p.snake : null;
       const cx = p ? p.camX : 0, cy = p ? p.camY : 0, hw = (p ? p.vw : 1600) / 2 + 80, hh = (p ? p.vh : 1000) / 2 + 80;
@@ -370,17 +375,19 @@
       const mn = []; for (const m of W.mines) if (inV(m.x, m.y, 30)) mn.push(Math.round(m.x), Math.round(m.y), m.t > .6 ? 1 : 0);
       const al = sortedAlive();
       const tag = s => s === me ? 1 : s.pid ? 2 : 0; // 1 = já, 2 = jiný člověk (kamarád)
-      const lb = al.slice(0, 8).map(s => [s.name, Math.floor(s.mass), tag(s)]);
+      const lb = light ? null : al.slice(0, 8).map(s => [s.name, Math.floor(s.mass), tag(s)]);
       const myRank = me ? al.indexOf(me) : -1;
-      if (me && myRank >= 8) lb.push([me.name, Math.floor(me.mass), 1, myRank + 1]);
-      const mm = []; for (const s of al) mm.push(Math.round(s.segs[0].x / 10), Math.round(s.segs[0].y / 10), s.ci, tag(s));
-      const bm = []; for (const b of W.boxes) bm.push(Math.round(b.x / 10), Math.round(b.y / 10));
+      if (lb && me && myRank >= 8) lb.push([me.name, Math.floor(me.mass), 1, myRank + 1]);
+      const mm = light ? null : []; if (mm) for (const s of al) mm.push(Math.round(s.segs[0].x / 10), Math.round(s.segs[0].y / 10), s.ci, tag(s));
+      const bm = light ? null : []; if (bm) for (const b of W.boxes) bm.push(Math.round(b.x / 10), Math.round(b.y / 10));
       const ev = [];
       if (p) { for (const e of W.log) if (e.s > p.seq && (!e.only || e.only === pid)) ev.push(e.ev); p.seq = W.seq; }
-      const out = { tm: Math.round(W.time * 100) / 100, cx: Math.round(cx), cy: Math.round(cy), sn, fo, bx, mi, mn, lb, mm, bm, ev, A: C.ARENA };
+      const out = { tm: Math.round(W.time * 1000) / 1000, cx: Math.round(cx), cy: Math.round(cy), sn, fo, bx, mi, mn, ev, A: C.ARENA };
+      if (!light) { out.lb = lb; out.mm = mm; out.bm = bm; }
       if (me) {
         out.me = { id: me.id, m: r1(me.mass), it: me.item ? IK.indexOf(me.item) : -1, ro: me.roll > 0 ? 1 : 0, en: Math.round(me.en), k: me.kills,
-          fx: [r1(Math.max(0, me.fx.turbo)), r1(Math.max(0, me.fx.shield)), r1(Math.max(0, me.fx.magnet))], b: me.boosting ? 1 : 0, rank: myRank + 1 };
+          fx: [r1(Math.max(0, me.fx.turbo)), r1(Math.max(0, me.fx.shield)), r1(Math.max(0, me.fx.magnet))], b: me.boosting ? 1 : 0, rank: myRank + 1,
+          q: p.q || 0, hx: r1(me.segs[0].x), hy: r1(me.segs[0].y), an: Math.round(me.angle * 1000) / 1000, enx: r1(me.en), ei: r1(Math.min(me.enIdle, 9)), sl: r1(Math.max(0, me.fx.slow)) };
       } else if (p && p.dead) out.dead = p.dead;
       return out;
     }
@@ -389,5 +396,5 @@
       get playerCount() { let n = 0; for (const p of W.players.values()) if (p.snake) n++; return n; } };
   }
 
-  return { createWorld, C, IK, ITEM_COL, PAL, SKINS };
+  return { createWorld, C, IK, ITEM_COL, PAL, SKINS, turnRate, speedOf };
 });

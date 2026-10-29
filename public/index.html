@@ -323,7 +323,11 @@ function connect(){
     if(m.t==='hi'){online=m.n;setNet(true);}
     else if(m.t==='lobby'){pendingLobby=null;lobby=m.code?m:null;lobbyErr('');renderLobby();}
     else if(m.t==='lobbyErr'){pendingLobby=null;{const k={e:m.e,code:m.code};lobbyErr(errText(k),k);}}
-    else if(m.t==='s'&&mode==='on'){snaps.push(m);lastArr=performance.now();if(snaps.length>30)snaps.shift();handleEvents(m.ev);}};
+    else if(m.t==='p'){const r=(performance.now()-m.c)/1000;if(r>0&&r<3)rtt=rttN++?rtt*.8+r*.2:r;}
+    else if(m.t==='s'&&mode==='on'){
+      if(m.lb){lastFull={lb:m.lb,mm:m.mm,bm:m.bm};}else if(lastFull){m.lb=lastFull.lb;m.mm=lastFull.mm;m.bm=lastFull.bm;}else{m.lb=[];m.mm=[];m.bm=[];}
+      const now=performance.now();snaps.push(m);lastArr=now;if(snaps.length>40)snaps.shift();handleEvents(m.ev);
+      onBase(m,now);}};
 }
 let netState='wait';
 function setNet(ok){
@@ -334,6 +338,61 @@ function setNet(ok){
   if(netState==='up')el.innerHTML=T().up(online);else el.textContent=netState==='down'?T().down:T().searching;
 }
 function send(o){if(ws&&wsOk)ws.send(JSON.stringify(o));}
+
+/* ---------- předpověď vlastního hada (proti lagu) ----------
+ * Server je autorita, ale čekat na jeho odpověď by znamenalo, že had zatočí až po celém pingu.
+ * Klient proto číslovaný vstup hned "přehraje" sám: vezme poslední stav od serveru a dopočítá
+ * pohyb podle vstupů, které server ještě nepotvrdil. Rozdíl proti serveru se plynule dorovná. */
+const C=G.C;
+let rtt=.1,rttN=0,seq=0,hist=[],lastAck={a:0,b:false},base=null,corr={x:0,y:0},lastFull=null,pingT=0;
+const angDiffC=(a,b)=>{let d=(a-b)%(Math.PI*2);if(d>Math.PI)d-=Math.PI*2;if(d<-Math.PI)d+=Math.PI*2;return d;};
+function onBase(m,now){
+  if(!m.me){base=null;hist=[];corr.x=corr.y=0;return;}
+  const M=m.me,mine=m.sn.find(a=>a[0]===M.id);
+  const before=base&&base.id===M.id?predict(now):null;
+  while(hist.length&&hist[0].q<=M.q){lastAck=hist[0];hist.shift();}
+  base={id:M.id,at:now,x:M.hx,y:M.hy,an:M.an,mass:M.m,en:M.enx,ei:M.ei,boosting:!!M.b,turbo:M.fx[0],slow:M.sl,body:mine?mine[8]:null};
+  if(before){const after=predict(now);corr.x+=before.x-after.x;corr.y+=before.y-after.y;
+    if(Math.hypot(corr.x,corr.y)>140)corr.x=corr.y=0;} // velký rozdíl (např. respawn) = skok, ne klouzání
+  else corr.x=corr.y=0;
+}
+function predict(now,live){ // live = aktuální myš, ještě neodeslaná
+  const B=base;let x=B.x,y=B.y,an=B.an,en=B.en,ei=B.ei,boosting=B.boosting,turbo=B.turbo,slow=B.slow;
+  const dt=1/60,trail=[x,y];let lx=x,ly=y;
+  let t=Math.max(B.at-rtt*1000,now-600),idx=0,ctl=lastAck;
+  while(idx<hist.length&&hist[idx].ts<=t){ctl=hist[idx];idx++;}
+  for(let guard=0;t<now&&guard<60;guard++){
+    while(idx<hist.length&&hist[idx].ts<=t){ctl=hist[idx];idx++;}
+    if(live&&idx>=hist.length&&t>=now-34)ctl=live;
+    const step=Math.min(dt,(now-t)/1000);if(step<=0)break;
+    const tr=G.turnRate(B.mass,true)*step;an+=Math.max(-tr,Math.min(tr,angDiffC(ctl.a,an)));
+    boosting=!!ctl.b&&(boosting?en>0:en>C.ENERGY_MIN_START);
+    if(boosting&&turbo<=0){en=Math.max(0,en-C.ENERGY_DRAIN*step);ei=0;}else{ei+=step;if(ei>C.ENERGY_DELAY)en=Math.min(C.ENERGY_MAX,en+C.ENERGY_REGEN*step);}
+    const sp=G.speedOf(turbo>0,boosting,slow>0);x+=Math.cos(an)*sp*step;y+=Math.sin(an)*sp*step;turbo-=step;slow-=step;
+    if(Math.hypot(x-lx,y-ly)>=6){trail.push(x,y);lx=x;ly=y;}
+    t+=step*1000;
+  }
+  if(trail[trail.length-2]!==x)trail.push(x,y);
+  return {x,y,an,trail};
+}
+// projde lomenou čáru od hlavy a vrátí n bodů po 12 px (stejně husté jako tělo ze serveru)
+function resample(pts,n,spacing){
+  const out=[pts[0],pts[1]];let need=spacing,i=0,px=pts[0],py=pts[1];
+  while(out.length<n*2&&i<pts.length-2){const qx=pts[i+2],qy=pts[i+3],d=Math.hypot(qx-px,qy-py);
+    if(d>=need){const k=need/d;px+=(qx-px)*k;py+=(qy-py)*k;out.push(px,py);need=spacing;}else{need-=d;px=qx;py=qy;i+=2;}}
+  while(out.length<n*2)out.push(out[out.length-2],out[out.length-1]);
+  return out;
+}
+function applyPrediction(v,now){
+  if(!base||!v.me||v.me.id!==base.id)return;
+  const s=v.sn.find(a=>a.id===base.id);if(!s||!base.body)return;
+  const P=predict(now,state==='play'?{a:Math.atan2(mouse.y-VH/2,mouse.x-VW/2),b:boostKey||boostMouse||boostTouch}:null);corr.x*=.88;corr.y*=.88; // dorovnání rozdílu proti serveru během ~150 ms
+  const path=[];for(let i=P.trail.length-2;i>=0;i-=2)path.push(P.trail[i],P.trail[i+1]);
+  for(let i=0;i<base.body.length;i++)path.push(base.body[i]);
+  const n=base.body.length/2,seg=resample(path,n,12);
+  for(let k=0;k<n;k++){const w=Math.max(0,1-k/12);seg[k*2]+=corr.x*w;seg[k*2+1]+=corr.y*w;}
+  s.seg=seg;s.angle=P.an;s.mass=base.mass;
+}
 const curName=()=>(document.getElementById('name').value||'').trim().slice(0,14)||T().player;
 
 /* ---------- lobby s kamarády ---------- */
@@ -383,6 +442,7 @@ function startGame(m){
   prof.name=(document.getElementById('name').value||'').trim().slice(0,14);
   store.set('name',prof.name);store.set('ci',prof.ci);store.set('skin',prof.skin);
   const opts={name:prof.name||T().player,ci:prof.ci,skin:prof.skin};
+  base=null;hist=[];corr.x=corr.y=0;lastFull=null;
   mode=m;lastMode=m;parts=[];bolts=[];feed=[];toast=null;deadShown=false;snaps=[];view=null;
   if(m==='off'){world=G.createWorld();pid=world.addPlayer(opts.name);world.spawnPlayer(pid,opts);}
   else send({t:'join',...opts});
@@ -503,10 +563,13 @@ function currentView(dt){
   if(mode==='on'&&snaps.length){
     const latest=snaps[snaps.length-1];
     estT=latest.tm+Math.min((performance.now()-lastArr)/1000,.25);
-    const rt=estT-.11;let a=snaps[0],b=latest;
+    const rt=estT-.085;let a=snaps[0],b=latest;
     for(let i=snaps.length-1;i>0;i--){if(snaps[i-1].tm<=rt){a=snaps[i-1];b=snaps[i];break;}}
     const k=b.tm>a.tm?clamp((rt-a.tm)/(b.tm-a.tm),0,1):1;
-    return interp(a,b,k);
+    const v=interp(a,b,k);v.me=latest.me;v.dead=latest.dead;v.lb=latest.lb;v.mm=latest.mm;v.bm=latest.bm;
+    if(v.me&&!v.sn.find(x=>x.id===v.me.id)){const mine=latest.sn.find(x=>x[0]===v.me.id);if(mine)v.sn.push(unpack({sn:[mine],fo:[],bx:[],mi:[],mn:[]}).sn[0]);}
+    applyPrediction(v,performance.now());
+    return v;
   }
   if(attract){attract.step(dt);return unpack(attract.snapshot(attractPid));}
   return null;
@@ -517,8 +580,10 @@ let stepAcc=0,netT=0;
 let last=performance.now();
 function frame(now){
   const dt=Math.min((now-last)/1000,.05);last=now;time+=dt;
-  if(mode==='on'&&state==='play'){netT-=dt;if(netT<=0||useQueued){netT=.05;
-    send({t:'in',a:Math.atan2(mouse.y-VH/2,mouse.x-VW/2),b:boostKey||boostMouse||boostTouch,u:useQueued?1:0,vw:VW/cam.z,vh:VH/cam.z});useQueued=false;}}
+  if(mode==='on'&&state==='play'){netT-=dt;if(netT<=0||useQueued){netT=1/30;
+    const inp={q:++seq,a:Math.atan2(mouse.y-VH/2,mouse.x-VW/2),b:boostKey||boostMouse||boostTouch,ts:now};hist.push(inp);if(hist.length>90)hist.shift();
+    send({t:'in',q:inp.q,a:Math.round(inp.a*1000)/1000,b:inp.b,u:useQueued?1:0,vw:Math.round(VW/cam.z),vh:Math.round(VH/cam.z)});useQueued=false;}}
+  if(wsOk&&now-pingT>2000){pingT=now;send({t:'p',c:now});}
   view=currentView(dt)||view;
   if(view&&view.dead&&state==='play'&&!deadShown){deadShown=true;setTimeout(()=>showOver(view.dead||lastDead),1300);lastDead=view.dead;}
   for(let j=parts.length-1;j>=0;j--){const p=parts[j];p.t-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.94;p.vy*=.94;if(p.t<=0)parts.splice(j,1);}
@@ -555,7 +620,9 @@ function render(dt){
   // jídlo
   ctx.globalCompositeOperation='lighter';
   const fo=v.fo;
+  const eatR=me?7+Math.min(me.mass/32,14)+8:0,ehx=me?me.seg[0]:0,ehy=me?me.seg[1]:0;
   for(let i=0;i<fo.length;i+=4){const x=fo[i],y=fo[i+1];if(!vis(x,y,20))continue;const val=fo[i+2]/10,r=Math.min(3+val*2.2,11),pul=1+Math.sin(time*4+x*.13+y*.07)*.15;
+    if(me&&mode==='on'&&Math.abs(x-ehx)<eatR+r&&Math.abs(y-ehy)<eatR+r&&Math.hypot(x-ehx,y-ehy)<eatR+r)continue; // jídlo, které už předpovězená hlava snědla
     ctx.fillStyle=PAL[fo[i+3]]||'#fff';ctx.globalAlpha=.22;ctx.beginPath();ctx.arc(x,y,r*2.3*pul,0,6.283);ctx.fill();
     ctx.globalAlpha=.95;ctx.beginPath();ctx.arc(x,y,r,0,6.283);ctx.fill();}
   ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';
@@ -651,6 +718,8 @@ function drawHUD(v,me){
   // minimapa
   const A=v.A||2600,mr=small?50:62,mx=VW-mr-16,my=VH-mr-16,ms=mr/A*10;
   ctx.fillStyle='rgba(12,18,38,.72)';ctx.beginPath();ctx.arc(mx,my,mr,0,6.283);ctx.fill();ctx.strokeStyle='rgba(255,79,123,.6)';ctx.lineWidth=1.5;ctx.stroke();
+  if(mode==='on'&&rttN){const ms=Math.round(rtt*1000);ctx.font='600 11px "Chakra Petch", system-ui, sans-serif';ctx.textAlign='center';ctx.textBaseline='alphabetic';
+    ctx.fillStyle=ms<80?'#7cff6b':ms<160?'#ffcf3a':'#ff4f7b';ctx.fillText('PING '+ms+' ms',mx,my-mr-8);}
   ctx.fillStyle='rgba(255,207,58,.7)';for(let i=0;i<v.bm.length;i+=2)ctx.fillRect(mx+v.bm[i]*ms-1,my+v.bm[i+1]*ms-1,2,2);
   for(let i=0;i<v.mm.length;i+=4){const tg=v.mm[i+3],x=mx+v.mm[i]*ms,y=my+v.mm[i+1]*ms;ctx.fillStyle=tg===1?'#fff':PAL[v.mm[i+2]];ctx.beginPath();ctx.arc(x,y,tg===1?3.5:2,0,6.283);ctx.fill();
     if(tg===2&&mode==='on'){ctx.strokeStyle='#46d9ff';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(x,y,4.5,0,6.283);ctx.stroke();}}
@@ -684,6 +753,7 @@ attract=G.createWorld();attractPid=attract.addPlayer('spectator');
 const _snap=attract.snapshot;attract.snapshot=p=>{const pl=attract.W.players.get(p);const big=attract.W.snakes.reduce((a,b)=>a&&a.mass>b.mass?a:b,null);
   if(pl&&big){pl.camX=big.segs[0].x;pl.camY=big.segs[0].y;pl.vw=VW/cam.z;pl.vh=VH/cam.z;}return _snap(p);};
 lvUI('lvNum','lvXp','lvBar');applyLang();connect();
+if(qs.get('debug'))window.__cc={view:()=>view,base:()=>base,corr:()=>corr,rtt:()=>rtt,latest:()=>snaps[snaps.length-1]};
 if(document.fonts&&document.fonts.load)document.fonts.load('20px Bungee').catch(()=>{});
 requestAnimationFrame(frame);
 })();
