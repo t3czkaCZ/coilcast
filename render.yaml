@@ -1,0 +1,10 @@
+# Render Blueprint – Render podle tohoto souboru nastaví službu sám.
+services:
+  - type: web
+    name: coilcast
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /status
+    autoDeploy: true

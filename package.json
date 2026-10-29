@@ -1,0 +1,12 @@
+{
+  "name": "coilcast",
+  "version": "0.3.0",
+  "description": "Coilcast – snake .io game with Mario Kart style spells, lobbies and bots",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "build:single": "node tools/build-single.js"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": { "ws": "^8.18.0" }
+}
